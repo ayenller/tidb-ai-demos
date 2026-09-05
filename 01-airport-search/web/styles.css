@@ -60,7 +60,10 @@ main{display:grid; grid-template-columns:minmax(340px,32%) 1fr; min-height:0}
   .cols{overflow:visible}
   .col{min-height:auto}
   .list{overflow:visible; flex:none}
-  .sqlbar{position:sticky; bottom:0}
+  /* NOT sticky here: the page itself scrolls, so an open drawer would float
+     over the columns instead of sitting under them */
+  .sqlbar{position:static; background:var(--panel-solid)}
+  .sqlbar pre{max-height:none}
 }
 
 /* ---------- globe ---------- */
@@ -210,3 +213,17 @@ main{display:grid; grid-template-columns:minmax(340px,32%) 1fr; min-height:0}
 }
 .sqltab:hover{color:var(--fg-dim); border-color:var(--line-strong)}
 .sqltab.on{color:var(--hyb); border-color:rgba(52,211,153,.5); background:rgba(52,211,153,.1)}
+
+/* language switcher */
+.langs{display:flex; gap:3px; padding:3px; border:1px solid var(--line); border-radius:999px;
+  background:rgba(6,11,22,.6); flex:none}
+.lang{
+  font-size:11px; padding:4px 10px; border-radius:999px; cursor:pointer; white-space:nowrap;
+  border:0; background:transparent; color:var(--fg-faint); font-family:var(--sans); transition:.14s;
+}
+.lang:hover{color:var(--fg)}
+.lang.on{background:rgba(52,211,153,.16); color:var(--hyb)}
+@media (max-width:900px){
+  header{flex-wrap:wrap}
+  .langs{order:3}
+}

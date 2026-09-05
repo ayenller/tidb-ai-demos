@@ -31,8 +31,10 @@ def health():
 
 
 @app.get("/api/search")
-def api_search(q: str = Query(..., min_length=1), limit: int = 10):
-    return search.search_all(q, limit)
+def api_search(q: str = Query(..., min_length=1)):
+    """All four strategies for one query. Per-strategy row counts live in
+    search.LIMITS so the page and the API can never disagree about them."""
+    return search.search_all(q)
 
 
 @app.get("/api/airports")

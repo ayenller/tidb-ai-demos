@@ -16,8 +16,10 @@ python3 scripts/dev_server.py 8137
 
 打开 http://localhost:8137 。不需要数据库、不需要 API key、不需要构建。
 页面自带 107 个真实机场（真实经纬度）和 116 条真实航线，四种检索全部在浏览器里跑。
+界面有 **English / 中文 / Português / Español** 四种语言，右上角切换。
 
-直接点页面上的预设查询，看四列结果怎么分道扬镳：
+直接点页面上的预设查询，看四列结果怎么分道扬镳（下面是英文界面下的查询，
+换语言后预设查询本身也会跟着换成那门语言）：
 
 | 预设查询 | `LIKE` | 全文 | 向量 | 说明 |
 |---|:--:|:--:|:--:|---|
@@ -31,6 +33,36 @@ python3 scripts/dev_server.py 8137
 `⚠️ 全是噪音` 是页面里能直接看到的一件事：BM25 对
 `airport near Silicon Valley` 会返回 10 条结果 —— 因为每一行都含有 `airport` 这个词。
 页面会把这些低于置信门限的结果打灰，并在融合阶段全部丢弃。
+
+**每一列返回几条**：`LIKE` 和全文返回的是一个有限集合，所以给 10 条 ——
+"它找到的全部"。向量检索无论多离谱都恰好返回 k 条，融合结果则是真要摆到用户面前的答案，
+这两列给 **3 条**（`engine.js` 的 `LIMITS`、`app/search.py` 的 `LIMITS`、
+以及 SQL 里的 `LIMIT 3`，三处保持一致）。注意融合的候选池仍然是每路 20 条，
+截断只发生在最外层。
+
+## 多语言
+
+界面、预设查询、以及结果里的解释文案都有四种语言：English / 中文 / Português / Español
+（[`web/js/i18n.js`](web/js/i18n.js)）。
+
+**预设查询本身也是本地化的**，不只是标签 —— 用葡语问
+`aeroporto mais alto dos Andes` 和用英语问是两个不同的测试，而前者才是葡语用户真正会遇到的。
+数据集始终是英文的，这正是"跨语言"那一行想说明的事：
+
+| 界面语言 | 「跨语言」预设 | LIKE | 全文 | 向量 |
+|---|---|:--:|:--:|:--:|
+| English  | `首都机场`               | 0 | 0 | ✅ PEK |
+| 中文     | `首都机场`               | 0 | 0 | ✅ PEK |
+| Português| `aeroporto de Pequim`   | 0 | 0 | ✅ PEK |
+| Español  | `aeropuerto de Pekín`   | 0 | 0 | ✅ PEK |
+
+做这件事的时候踩到一个真实的坑：罗曼语族的虚词会把 BM25 拖成噪音 ——
+`aeropuerto cerca **del** Valle` 里的 `del` 命中德里（DEL），
+`más alto de **los** Andes` 里的 `los` 命中拉各斯（LOS），
+`San José **y**...` 里的 `y` 命中圣何塞（SJC）。三个都是恰好拼成西语虚词的 IATA 代码。
+所以 `engine.js` 的停用词表覆盖了四种语言。
+
+SQL 保持英文 —— 它是代码，而且和 `sql/02_queries.sql` 里的一字不差。
 
 ---
 
@@ -72,6 +104,8 @@ ORDER BY VEC_COSINE_DISTANCE(doc_vec, @query_embedding) LIMIT 10
 哪怕最好的那条其实毫不相关。页面里搜 `Heathrow` 时，向量列第 2 到第 10 条
 就是这种填充噪音。
 **代价**：HNSW 索引，跑在列存副本上。
+怎么确认索引真的被用上了（而不是暴力扫描 —— 结果一样但慢得多），
+见 `sql/02_queries.sql` 里那段 `EXPLAIN` 注释。
 
 ### 4 · 融合 — Reciprocal Rank Fusion
 
@@ -136,6 +170,10 @@ Dedicated 集群请先确认版本。
 - **向量是模拟的** —— 用概念标签 + 三元组模糊匹配去复现 embedding 的**行为**
   （容错、跨语言、改写理解），让对比有意义，但它不是真的 embedding。
   数据里 `tags` / `aliases` 两个字段只服务于这个模拟，连上真实 TiDB 后完全不用。
+- **跨语言也是模拟的**。真正的多语言 embedding 模型自己就知道
+  `aeroporto mais alto dos Andes` 指向 El Alto；离线模拟没有模型，只能被告知，
+  所以 `data.js` 末尾有一块 `ML_ALIASES`，把中文/葡语/西语的说法并进 `aliases`。
+  同样地，连上真实 TiDB 后这块完全不参与 —— `doc` 的 embedding 一个人干完所有事。
 
 模拟的边界在页面上也看得见：搜 `airport near Silicon Valley` 时
 墨西哥城（MEX）会挤进结果——因为它的描述里有 "valley of mexico"。
@@ -189,7 +227,8 @@ scripts/build_outlines.py 重新生成 web/js/world.js（只依赖标准库）
 app/search.py            四个检索函数 + RRF 融合（Python 侧）
 app/main.py              FastAPI：/api/search、/api/airports、静态页面
 web/index.html           页面
-web/js/data.js           离线样本：107 个机场 + 116 条航线 + 预设查询
+web/js/i18n.js           四种语言的界面文案 + 本地化的预设查询
+web/js/data.js           离线样本：107 个机场 + 116 条航线 + 多语言别名
 web/js/engine.js         浏览器里的四个检索器（BM25 真实、向量模拟）
 web/js/world.js          国家轮廓：Natural Earth 110m，离线简化过（6.6k 点 / 83KB）
 web/js/globe.js          three.js 地球；three.js 加载失败时降级到等距圆柱 2D canvas

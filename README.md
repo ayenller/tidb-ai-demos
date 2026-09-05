@@ -14,7 +14,7 @@ Every demo is built so you can:
 
 | # | Demo | What it shows | Status |
 |---|------|---------------|--------|
-| [01](./01-airport-search) | **Airport Search: 4 ways to retrieve** | The same query run through `LIKE`, full-text (BM25), vector (semantic), and a hybrid RRF fusion — side by side, on the OpenFlights airport dataset. | ✅ Ready |
+| [01](./01-airport-search) | **Airport Search: 4 ways to retrieve** | The same query run through `LIKE`, full-text (BM25), vector (semantic), and a hybrid RRF fusion — side by side, on the OpenFlights airport dataset. UI and preset queries in English, 中文, Português and Español. | ✅ Ready |
 | 02 | _Flight RAG assistant_ | Retrieval-augmented Q&A over routes + airports | 🚧 Planned |
 | 03 | _Realtime vector ingestion_ | Streaming embeddings into TiDB, HTAP freshness | 🚧 Planned |
 

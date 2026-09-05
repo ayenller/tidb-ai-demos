@@ -62,34 +62,69 @@ LIMIT 10;
 --
 -- What it is good at : meaning. Typos, paraphrases, cross-language,
 --                      descriptions instead of names ("windy airport in
---                      the Andes", "机场 靠近 硅谷").
+--                      the Andes", "安第斯山脉海拔最高的机场",
+--                      "aeroporto perto do Vale do Silício").
 -- Where it falls over : short opaque tokens. 'JFK' as an embedding is
---                       close to lots of unrelated airports, and it will
---                       happily return 10 rows for a query that should
---                       have returned nothing — there is no "no match".
+--                       close to lots of unrelated airports.
 -- Cost               : HNSW index on the columnar replica.
+--
+-- Note what is NOT in this query: a WHERE clause. A vector search always
+-- returns exactly LIMIT rows, however far away the nearest neighbours
+-- are. There is no "no match" — which is exactly why it needs a keyword
+-- partner, and why the fusion below gates it on score.
 -- ---------------------------------------------------------------------
-SELECT id, name, city, country, iata,
-       1 - VEC_COSINE_DISTANCE(doc_vec, :q_vec) AS score   -- cosine similarity
+
+-- The application embeds the query string first — the one step that
+-- happens outside the database. 1536 floats for text-embedding-3-small.
+SET @qv = '[0.0131,-0.4422, ... 1532 more ... ,0.0917]';   -- = embed(:q)
+
+SELECT id, name, city, country, iata, icao, alt_ft, size_class,
+       1 - VEC_COSINE_DISTANCE(doc_vec, @qv) AS similarity
 FROM airports
-ORDER BY VEC_COSINE_DISTANCE(doc_vec, :q_vec)              -- ASC = nearest
-LIMIT 10;
+ORDER BY VEC_COSINE_DISTANCE(doc_vec, @qv)     -- ASC: nearest neighbour first
+LIMIT 3;
+
+-- How to confirm the vector index is actually being used (rather than a
+-- brute-force scan, which returns the same rows and is far slower):
+--
+--   EXPLAIN SELECT id FROM airports
+--    ORDER BY VEC_COSINE_DISTANCE(doc_vec, @qv) LIMIT 3;
+--   -- look for  annIndex:COSINE(doc_vec..)  in the TableFullScan operator
+--
+-- And to check the index has finished building after a bulk load:
+--
+--   SELECT * FROM information_schema.tiflash_indexes
+--    WHERE table_name = 'airports';
 
 
 -- ---------------------------------------------------------------------
 -- (4) HYBRID  —  Reciprocal Rank Fusion over all three
 --
---     rrf_score(d) = SUM over each retriever r of  weight_r / (k + rank_r(d))
+--     rrf(d) = SUM over each retriever r of   weight_r / (k + rank_r(d))
 --
--- RRF fuses *ranks*, not scores, so you never have to normalise a BM25
--- score against a cosine similarity against a hand-made CASE expression.
--- k = 60 is the standard constant; it damps the tail so that being #1 in
--- one list beats being #4 in two lists only slightly.
+-- RRF fuses *ranks*, not scores, so a BM25 score, a cosine similarity and
+-- a hand-made CASE expression never have to be normalised onto a common
+-- scale — a problem that is genuinely hard to solve well.
 --
--- This is one query, one round trip, one transaction-consistent snapshot.
+-- k = 60 is the standard constant; it damps the tail, so being #1 in one
+-- list beats being #4 in two lists only slightly.
+--
+-- The two score gates are the part most write-ups leave out. Plain RRF
+-- looks only at rank, so a retriever that found nothing useful still gets
+-- to vote with its rank-1 garbage. Without the gates, "airport near
+-- Silicon Valley" is decided by ten BM25 rows whose only shared word is
+-- "airport".
+--
+-- One statement. One round trip. One transaction-consistent snapshot.
 -- ---------------------------------------------------------------------
+SET @qv  = '[0.0131,-0.4422, ... 1532 more ... ,0.0917]';   -- = embed(:q)
+SET @k   = 60;      -- RRF constant
+SET @n   = 20;      -- candidates each retriever contributes to the fusion
+SET @gv  = 0.58;    -- vector gate: cosine-similarity floor
+SET @gf  = 0.30;    -- full-text gate: BM25 floor
+
 WITH
-lex AS (            -- (1) LIKE candidates
+lex AS (                                    -- (1) LIKE candidates
     SELECT id, ROW_NUMBER() OVER (ORDER BY
                CASE WHEN iata = UPPER(:q) THEN 0
                     WHEN name LIKE CONCAT(:q,'%') THEN 1
@@ -101,43 +136,44 @@ lex AS (            -- (1) LIKE candidates
        OR iata = UPPER(:q)
     LIMIT 20
 ),
-fts AS (            -- (2) full-text candidates
+fts AS (                                    -- (2) full-text candidates
     SELECT id, ROW_NUMBER() OVER (ORDER BY FTS_MATCH_WORD(:q, doc) DESC) AS rnk
     FROM airports
     WHERE FTS_MATCH_WORD(:q, doc)
+      AND FTS_MATCH_WORD(:q, doc) >= 0.30        -- gate
     LIMIT 20
 ),
-vec AS (            -- (3) vector candidates
-    SELECT id, ROW_NUMBER() OVER (ORDER BY VEC_COSINE_DISTANCE(doc_vec, :q_vec)) AS rnk
+vec AS (                                    -- (3) vector candidates
+    SELECT id, ROW_NUMBER() OVER (ORDER BY VEC_COSINE_DISTANCE(doc_vec, @qv)) AS rnk
     FROM (
         SELECT id, doc_vec
         FROM airports
-        ORDER BY VEC_COSINE_DISTANCE(doc_vec, :q_vec)
+        WHERE 1 - VEC_COSINE_DISTANCE(doc_vec, @qv) >= 0.58   -- gate
+        ORDER BY VEC_COSINE_DISTANCE(doc_vec, @qv)
         LIMIT 20
     ) t
 ),
 fused AS (
-    SELECT id,
-           SUM(w / (60 + rnk)) AS rrf
+    SELECT id, SUM(w / (60 + rnk)) AS rrf
     FROM (
         SELECT id, rnk, 1.0 AS w FROM lex
         UNION ALL
         SELECT id, rnk, 1.0 AS w FROM fts
         UNION ALL
-        SELECT id, rnk, 1.2 AS w FROM vec   -- tune per dataset
+        SELECT id, rnk, 1.4 AS w FROM vec      -- weights are per-dataset
     ) all_lists
     GROUP BY id
 )
-SELECT a.id, a.name, a.city, a.country, a.iata,
+SELECT a.id, a.name, a.city, a.country, a.iata, a.icao, a.alt_ft, a.size_class,
        f.rrf AS score,
-       -- provenance: which retrievers voted for this row?
+       -- provenance: which retrievers voted for this row, and how highly?
        (SELECT rnk FROM lex WHERE lex.id = a.id) AS like_rank,
        (SELECT rnk FROM fts WHERE fts.id = a.id) AS fts_rank,
        (SELECT rnk FROM vec WHERE vec.id = a.id) AS vec_rank
 FROM fused f
 JOIN airports a ON a.id = f.id
 ORDER BY f.rrf DESC
-LIMIT 10;
+LIMIT 3;                                    -- the answer a user actually sees
 
 
 -- ---------------------------------------------------------------------
@@ -149,11 +185,11 @@ LIMIT 10;
 --    that actually have more than 50 outbound routes"
 -- ---------------------------------------------------------------------
 SELECT a.name, a.city, a.country, a.alt_ft, COUNT(r.id) AS out_routes,
-       1 - VEC_COSINE_DISTANCE(a.doc_vec, :q_vec) AS similarity
+       1 - VEC_COSINE_DISTANCE(a.doc_vec, @qv) AS similarity
 FROM airports a
 JOIN routes r ON r.src_iata = a.iata
-WHERE a.alt_ft > 8000
+WHERE a.alt_ft > 8000                              -- relational filter
 GROUP BY a.id, a.name, a.city, a.country, a.alt_ft, a.doc_vec
-HAVING out_routes > 50
-ORDER BY VEC_COSINE_DISTANCE(a.doc_vec, :q_vec)
+HAVING out_routes > 50                             -- aggregate filter
+ORDER BY VEC_COSINE_DISTANCE(a.doc_vec, @qv)       -- semantic ranking
 LIMIT 10;

@@ -17,7 +17,12 @@
  * ===================================================================== */
 const Engine = (() => {
   const K_RRF = 60;
-  const POOL = 20;
+  const POOL = 20;           // candidates each retriever feeds into the fusion
+  // How many rows each column shows. LIKE and full-text return a finite set,
+  // so ten is "everything they found". A vector search always returns exactly
+  // k no matter how bad the match is, and the hybrid list is the answer you
+  // would actually put in front of a user — for those two, three.
+  const LIMITS = { like: 10, fulltext: 10, vector: 3, hybrid: 3 };
   const WEIGHTS = { like: 1.0, fulltext: 1.0, vector: 1.4 };
   // Plain RRF fuses ranks and ignores score magnitude — so a retriever that
   // found nothing useful still gets to vote with its rank-1 garbage. Real
@@ -28,8 +33,24 @@ const Engine = (() => {
     fulltextAbs: 0.30,   // and an absolute floor: matching only the word
                          // "airport" is not a match, however you rank it
   };
-  const STOP = new Set(["a","an","the","of","in","on","at","to","for","and","or",
-    "is","are","with","where","that","near","by","from","it","its","as","be"]);
+  // Function words in every language the UI speaks. These matter more than
+  // they look: without them "aeropuerto cerca DEL Valle" matches Delhi and
+  // "mas alto de LOS Andes" matches Lagos, purely on IATA codes that happen
+  // to spell a Spanish article.
+  const STOP = new Set([
+    // en
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or",
+    "is", "are", "with", "where", "that", "near", "by", "from", "it", "its",
+    "as", "be", "most",
+    // es
+    "el", "la", "los", "las", "un", "una", "unos", "unas", "del", "al",
+    "en", "y", "o", "con", "por", "para", "que", "cerca", "mas", "muy", "su",
+    // pt
+    "os", "um", "uma", "do", "da", "dos", "das", "no", "na", "nos", "nas",
+    "e", "com", "perto", "mais", "muito", "seu", "sua",
+    // shared es/pt
+    "de", "se", "sem", "sin", "sobre",
+  ]);
 
   // ---------- tokenisation -------------------------------------------------
   const deaccent = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
@@ -98,7 +119,7 @@ const Engine = (() => {
       docs[i] = { tf, len: dt.length };
       const stf = new Map();
       for (const t of st) stf.set(t, (stf.get(t) || 0) + 1);
-      sem[i] = { tf: stf, text: semText.toLowerCase() };
+      sem[i] = { tf: stf, text: deaccent(semText.toLowerCase()) };
       for (const t of new Set(dt)) df.set(t, (df.get(t) || 0) + 1);
       for (const t of new Set(st)) semDf.set(t, (semDf.get(t) || 0) + 1);
     });
@@ -111,7 +132,7 @@ const Engine = (() => {
   };
 
   // ---------- (1) LIKE -----------------------------------------------------
-  function like(airports, q, limit = 10) {
+  function like(airports, q, limit = LIMITS.like) {
     const needle = q.trim().toLowerCase();
     const upper = q.trim().toUpperCase();
     if (!needle) return [];
@@ -127,8 +148,8 @@ const Engine = (() => {
       else if (a.name.toLowerCase().startsWith(needle)) score = 80;
       else if (a.city.toLowerCase().startsWith(needle)) score = 70;
       else if (inName) score = 50;
-      hits.push({ a, score, why: isCode ? "code match"
-        : inName ? "substring in name" : inCity ? "substring in city" : "substring in country" });
+      hits.push({ a, score, why: [{ k: isCode ? "code" : inName ? "inName"
+        : inCity ? "inCity" : "inCountry" }] });
     });
     // LIKE gives every matching row the same "relevance", so the tie-break is
     // pure guesswork. Busiest-first is the least-bad guess — and it is the one
@@ -139,7 +160,7 @@ const Engine = (() => {
   }
 
   // ---------- (2) FULL-TEXT (BM25) ----------------------------------------
-  function fulltext(airports, q, limit = 10) {
+  function fulltext(airports, q, limit = LIMITS.fulltext) {
     const qt = [...new Set(tokenize(q))];
     if (!qt.length) return [];
     const k1 = 1.2, b = 0.75;
@@ -152,7 +173,7 @@ const Engine = (() => {
         matched.push(t);
         s += idf(df, t) * (f * (k1 + 1)) / (f + k1 * (1 - b + b * docs[i].len / avgdl));
       }
-      if (s > 0) hits.push({ a, score: s, why: `BM25 · matched ${matched.join(", ")}` });
+      if (s > 0) hits.push({ a, score: s, why: [{ k: "bm25", terms: matched }] });
     });
     hits.sort((x, y) => y.score - x.score);
     const max = hits.length ? hits[0].score : 1;
@@ -160,7 +181,7 @@ const Engine = (() => {
   }
 
   // ---------- (3) VECTOR (simulated) --------------------------------------
-  function vector(airports, q, limit = 10) {
+  function vector(airports, q, limit = LIMITS.vector) {
     const qt = [...new Set(tokenize(q))];
     const phrases = latinPhrases(q);
     if (!qt.length) return [];
@@ -175,7 +196,7 @@ const Engine = (() => {
       // phrase hits ("silicon valley") count for a lot — that is the part a
       // keyword index cannot do, because the phrase is nowhere in the data.
       for (const p of phrases) {
-        if (sem[i].text.includes(p)) { s += 3.5; why.push(`concept "${p}"`); }
+        if (sem[i].text.includes(p)) { s += 3.5; why.push({ k: "concept", p }); }
       }
       // fuzzy: the typo-tolerance an embedding gives you for free
       let fuzz = 0;
@@ -189,10 +210,10 @@ const Engine = (() => {
           }
         }
       }
-      if (fuzz > 0) { s += fuzz * 6; why.push(`fuzzy ~${fuzz.toFixed(2)}`); }
+      if (fuzz > 0) { s += fuzz * 6; why.push({ k: "fuzzy", v: fuzz }); }
       // popularity prior — big hubs sit in denser neighbourhoods
       s += { hub: 0.9, large: 0.4, regional: 0 }[a.size];
-      return { a, score: s, why: why.join(" · ") || "semantic neighbourhood" };
+      return { a, score: s, why: why.length ? why : [{ k: "neighbour" }] };
     });
     // A vector search ALWAYS returns k rows. There is no "no match" — that is
     // exactly why it needs a keyword partner. We keep that behaviour.
@@ -237,7 +258,7 @@ const Engine = (() => {
     return rows;
   }
 
-  function hybrid(lists, limit = 10) {
+  function hybrid(lists, limit = LIMITS.hybrid) {
     const fused = new Map();
     for (const [key, rows] of Object.entries(lists)) {
       gated(key, rows).slice(0, POOL).forEach((r, i) => {
@@ -257,7 +278,7 @@ const Engine = (() => {
       score: e.rrf,
       norm: e.rrf / max,
       sources: e.sources,
-      why: Object.entries(e.sources).map(([k, v]) => `${LABEL[k]}#${v}`).join(" + "),
+      why: Object.entries(e.sources).map(([k, v]) => ({ k: "src", r: LABEL[k], n: v })),
     }));
   }
 
@@ -279,23 +300,25 @@ const Engine = (() => {
   }
 
   // ---------- public -------------------------------------------------------
-  function searchAll(airports, q, limit = 10) {
+  function searchAll(airports, q, limits = LIMITS) {
     const t0 = performance.now();
+    // every retriever runs to POOL depth — the fusion needs the deep list even
+    // though the column only shows the head of it
     const lk = like(airports, q, POOL);
     const ft = fulltext(airports, q, POOL);
     const vc = vector(airports, q, POOL);
-    const hy = hybrid({ like: lk, fulltext: ft, vector: vc }, limit);
+    const hy = hybrid({ like: lk, fulltext: ft, vector: vc }, limits.hybrid);
     return {
       query: q,
       tookMs: performance.now() - t0,
       strategies: {
-        like: { results: lk.slice(0, limit) },
-        fulltext: { results: mark("fulltext", ft).slice(0, limit) },
-        vector: { results: mark("vector", vc).slice(0, limit) },
+        like: { results: lk.slice(0, limits.like) },
+        fulltext: { results: mark("fulltext", ft).slice(0, limits.fulltext) },
+        vector: { results: mark("vector", vc).slice(0, limits.vector) },
         hybrid: { results: hy },
       },
     };
   }
 
-  return { build, searchAll, tokenize, trigramSim, WEIGHTS, K_RRF, GATE };
+  return { build, searchAll, tokenize, trigramSim, WEIGHTS, K_RRF, GATE, LIMITS, POOL };
 })();

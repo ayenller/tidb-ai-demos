@@ -167,14 +167,77 @@ const ROUTES = [
   ["YVR","YYZ"],["ANC","SEA"],["LAS","PHX"],["IAD","LHR"],["EWR","LGA"],["OAK","SJC"],
 ];
 
-/* Preset queries — each one exists to make a different retriever fail. */
-const PRESETS = [
-  { q: "Heathrow",  label: "精确名称",   hint: "四种方式都能命中 — 基线" },
-  { q: "heathrwo airprot", label: "拼写错误", hint: "两个词都拼错 — LIKE 和全文双双归零" },
-  { q: "首都机场",  label: "跨语言",     hint: "英文数据 + 中文提问，只有向量能跨过去" },
-  { q: "airport near Silicon Valley", label: "描述式", hint: "没有一行数据写着 Silicon Valley" },
-  { q: "JFK",       label: "IATA 代码",  hint: "反过来：向量最差，LIKE 最准" },
-  { q: "windy airport with a difficult landing", label: "概念检索", hint: "问的是感觉，不是名字" },
-  { q: "highest airport in the Andes", label: "常识推理", hint: "要同时懂 highest 和 Andes" },
-  { q: "london",    label: "多义词",     hint: "3 个伦敦机场 + 排序质量差异" },
-];
+/* Preset queries live in i18n.js — they are localised, not just labelled. */
+
+/* ---------------------------------------------------------------------
+ *  Multilingual aliases (*) — offline simulation only.
+ *
+ *  A real multilingual embedding model already knows that "aeroporto mais
+ *  alto dos Andes" and "安第斯山脉海拔最高的机场" point at El Alto. The
+ *  offline simulation has no model, so it needs to be told. Kept in one
+ *  block rather than sprinkled through the table above, and merged into
+ *  `aliases` — which the vector simulation reads and nothing else does.
+ *
+ *  Connected to a real TiDB cluster, none of this is used: the embedding
+ *  of `doc` does the whole job.
+ * ------------------------------------------------------------------- */
+const ML_ALIASES = {
+  // cross-language name lookups
+  PEK: ["Pequim", "Pekín", "北京"],
+  PKX: ["Pequim", "Pekín", "北京"],
+  LHR: ["伦敦", "Londres", "希思罗"],
+  LGW: ["伦敦", "Londres", "盖特威克"],
+  STN: ["伦敦", "Londres", "斯坦斯特德"],
+  JFK: ["纽约", "Nova York", "Nueva York"],
+  LAX: ["洛杉矶", "Los Ángeles"],
+  SFO: ["旧金山", "湾区", "硅谷", "São Francisco", "San Francisco",
+        "Vale do Silício", "Valle del Silicio", "baía", "bahía"],
+  SJC: ["硅谷", "圣何塞", "San José", "Vale do Silício", "Valle del Silicio",
+        "empresas de tecnologia", "empresas de tecnología"],
+  CDG: ["巴黎", "París", "Paris"],
+  MAD: ["马德里", "Madri", "Barajas"],
+  BCN: ["巴塞罗那", "Barcelona", "mediterrâneo", "mediterráneo"],
+  LIS: ["里斯本", "Lisboa"],
+  GRU: ["圣保罗", "São Paulo", "Guarulhos", "maior da América do Sul"],
+  GIG: ["里约热内卢", "Rio de Janeiro", "praia"],
+  EZE: ["布宜诺斯艾利斯", "Buenos Aires", "Ezeiza"],
+  MEX: ["墨西哥城", "Ciudad de México", "gran altitud", "grande altitude"],
+  FRA: ["法兰克福", "Frankfurt"],
+  AMS: ["阿姆斯特丹", "Ámsterdam"],
+  FCO: ["罗马", "Roma"],
+  IST: ["伊斯坦布尔", "Estambul", "Istambul"],
+  DXB: ["迪拜", "Dubái", "deserto", "desierto"],
+  SYD: ["悉尼", "Sídney"],
+
+  // concept lookups the preset queries lean on
+  LPB: ["安第斯", "海拔最高", "最高的机场", "拉巴斯",
+        "Andes", "mais alto", "más alto",
+        "mais alto do mundo", "más alto del mundo", "altiplano"],
+  BOG: ["安第斯", "波哥大", "Andes", "grande altitude", "gran altitud"],
+  UIO: ["安第斯", "基多", "Quito", "Andes", "grande altitude", "gran altitud"],
+  LIM: ["安第斯", "利马", "Lima", "Andes"],
+  SCL: ["安第斯", "圣地亚哥", "Santiago", "Andes", "cordilheira", "cordillera"],
+  WLG: ["风大", "大风", "着陆困难", "惠灵顿",
+        "vento forte", "ventoso", "pouso difícil",
+        "viento fuerte", "aterrizaje difícil"],
+  FNC: ["风大", "着陆困难", "马德拉", "Madeira",
+        "vento forte", "ventoso", "pouso difícil", "penhasco",
+        "viento fuerte", "aterrizaje difícil", "acantilado"],
+  KEF: ["冰岛", "风大", "Islândia", "Islandia", "ventoso"],
+  CPT: ["风大", "开普敦", "Cidade do Cabo", "Ciudad del Cabo", "ventoso"],
+  SXM: ["海滩", "沙滩降落", "praia", "pouso na praia", "playa", "aterrizaje en la playa"],
+  BRR: ["海滩", "praia", "playa", "areia", "arena"],
+  LUA: ["珠峰", "最危险", "Everest", "perigoso", "peligroso"],
+  PBH: ["喜马拉雅", "危险", "Himalaia", "Himalaya", "perigoso", "peligroso"],
+  LXA: ["西藏", "拉萨", "海拔最高", "Tibete", "Tíbet", "grande altitude", "gran altitud"],
+  CVF: ["滑雪", "esqui", "esquí", "montanha", "montaña"],
+  LYR: ["最北", "北极", "mais ao norte", "más al norte", "ártico"],
+  USH: ["最南", "世界尽头", "mais ao sul", "más al sur", "fim do mundo", "fin del mundo"],
+  DEN: ["丹佛", "montanhas rochosas", "montañas rocosas"],
+  ADD: ["海拔最高", "grande altitude", "gran altitud"],
+  JNB: ["约翰内斯堡", "Joanesburgo", "Johannesburgo", "grande altitude", "gran altitud"],
+};
+AIRPORTS.forEach((a) => {
+  const extra = ML_ALIASES[a.iata];
+  if (extra) a.aliases = a.aliases.concat(extra);
+});
