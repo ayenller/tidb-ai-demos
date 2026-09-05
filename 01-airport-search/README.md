@@ -185,17 +185,36 @@ sql/01_schema.sql        建表：关系 + 全文索引 + 向量索引
 sql/02_queries.sql       四种检索的 SQL 原文，逐条带注释 ← 想看重点看这个
 scripts/load_data.py     下载 OpenFlights、构造 doc、批量 embedding、写入
 scripts/dev_server.py    不带缓存的静态服务器
+scripts/build_outlines.py 重新生成 web/js/world.js（只依赖标准库）
 app/search.py            四个检索函数 + RRF 融合（Python 侧）
 app/main.py              FastAPI：/api/search、/api/airports、静态页面
 web/index.html           页面
 web/js/data.js           离线样本：107 个机场 + 116 条航线 + 预设查询
 web/js/engine.js         浏览器里的四个检索器（BM25 真实、向量模拟）
-web/js/globe.js          three.js 地球；three.js 加载失败时降级到 2D canvas
+web/js/world.js          国家轮廓：Natural Earth 110m，离线简化过（6.6k 点 / 83KB）
+web/js/globe.js          three.js 地球；three.js 加载失败时降级到等距圆柱 2D canvas
 web/js/app.js            UI
 ```
 
+## 关于那个地球
+
+- **大陆轮廓**是 Natural Earth 1:110m 国界，用 Douglas-Peucker（eps 0.2°）离线简化到
+  6.6k 个点、83KB，直接编进 `web/js/world.js`——不在运行时拉 CDN，所以断网也能看。
+  简化之后还做了一次「加密」：把过长的线段重新打点，否则它在球面上会变成一条穿过球体的弦。
+- **机场点**按 hub / large / regional 分成三层，hub 那层的点会随时间轻微呼吸。
+- **航班**是沿真实航线曲线跑的彗星：一个亮头 + 14 段渐隐拖尾，用逐顶点颜色做 alpha
+  （加法混合下，颜色变暗就等于变透明）。
+- **选中机场**会被转到正对镜头的正中央，同时把它的进出港航线一条条画出来
+  （`setDrawRange` 逐帧推进），并挂一个 HUD 标签。
+  居中用的是绕 Y 转到方位角 0、再绕 X 抬起 `lat` —— three.js 的 XYZ 欧拉序是先 Y 后 X，
+  所以 Y 要取方位角的**负值**。
+- 补间用的是按时间的指数平滑（`1 - exp(-dt·7.5)`），不是每帧固定比例，
+  这样 30fps 和 144fps 下的动画时长一致。
+
 ## 数据来源
 
-[OpenFlights](https://github.com/jpatokal/openflights)（airports.dat / routes.dat，ODbL）。
-`web/js/data.js` 里的 107 个机场是从中挑出的子集，另外手工加了 `tags` / `aliases`
-两个字段专供离线模拟使用。
+- [OpenFlights](https://github.com/jpatokal/openflights)（airports.dat / routes.dat，ODbL）。
+  `web/js/data.js` 里的 107 个机场是从中挑出的子集，另外手工加了 `tags` / `aliases`
+  两个字段专供离线模拟使用。
+- [Natural Earth](https://www.naturalearthdata.com/) 1:110m admin-0（public domain），
+  简化后即 `web/js/world.js`。
