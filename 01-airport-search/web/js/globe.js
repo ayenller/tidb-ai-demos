@@ -168,8 +168,19 @@ const Globe = (() => {
     world.add(markers);
     let ringMat = null, drawing = [], label = null;
 
+    /** Hovering a result row rebuilds this group, so it has to give the GPU
+     *  back everything it took — the label in particular is a fresh canvas
+     *  texture per selection, and leaking one per hover adds up fast. */
     function clearMarkers() {
-      markers.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+      markers.traverse((o) => {
+        if (o.geometry) o.geometry.dispose();
+        const m = o.material;
+        if (!m) return;
+        // the dot and ring textures are shared with the rest of the scene;
+        // only the label canvas belongs to this group
+        if (m.map && m.map !== SHARED.dot && m.map !== SHARED.ring) m.map.dispose();
+        m.dispose();
+      });
       markers.clear();
       ringMat = null; drawing = []; label = null;
     }
@@ -436,7 +447,14 @@ const Globe = (() => {
     x.arcTo(l, t, l + w, t, r); x.closePath();
   }
 
-  function dotTexture(T) {
+  // Both sprites are drawn once and shared by every point cloud in the
+  // scene. They used to be rebuilt at each call site — five identical
+  // textures uploaded to the GPU instead of one.
+  const SHARED = { dot: null, ring: null };
+  const dotTexture = (T) => SHARED.dot || (SHARED.dot = makeDot(T));
+  const ringTexture = (T) => SHARED.ring || (SHARED.ring = makeRing(T));
+
+  function makeDot(T) {
     const c = document.createElement("canvas"); c.width = c.height = 64;
     const x = c.getContext("2d");
     const g = x.createRadialGradient(32, 32, 0, 32, 32, 32);
@@ -445,7 +463,7 @@ const Globe = (() => {
     x.fillStyle = g; x.fillRect(0, 0, 64, 64);
     return new T.CanvasTexture(c);
   }
-  function ringTexture(T) {
+  function makeRing(T) {
     const c = document.createElement("canvas"); c.width = c.height = 64;
     const x = c.getContext("2d");
     x.strokeStyle = "rgba(255,255,255,1)"; x.lineWidth = 4;

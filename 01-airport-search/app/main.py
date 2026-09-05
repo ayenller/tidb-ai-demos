@@ -22,9 +22,7 @@ app.add_middleware(
 @app.get("/api/health")
 def health():
     try:
-        with db.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS n FROM airports")
-            n = cur.fetchone()["n"]
+        n = db.query("SELECT COUNT(*) AS n FROM airports")[0]["n"]
         return {"ok": True, "airports": n}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -40,13 +38,11 @@ def api_search(q: str = Query(..., min_length=1)):
 @app.get("/api/airports")
 def api_airports(limit: int = 400):
     """Points for the globe."""
-    with db.cursor() as cur:
-        cur.execute(
-            "SELECT id, name, city, country, iata, lat, lon FROM airports "
-            "WHERE iata IS NOT NULL ORDER BY id LIMIT %s",
-            (limit,),
-        )
-        return cur.fetchall()
+    return db.query(
+        "SELECT id, name, city, country, iata, lat, lon, size_class FROM airports "
+        "WHERE iata IS NOT NULL ORDER BY id LIMIT %(n)s",
+        {"n": limit},
+    )
 
 
 app.mount("/", StaticFiles(directory=WEB, html=True), name="web")

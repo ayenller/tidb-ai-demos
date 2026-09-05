@@ -26,12 +26,15 @@
     <div class="spacer"></div>
     <div class="langs" id="langs" role="group" aria-label="Language"></div>
     <span class="badge" id="mode"></span>
-    <a href="../README.md">README</a>
+    <!-- ../README.md 404s: the page is served from web/, and the FastAPI
+         app mounts the same directory at "/" -->
+    <a href="https://github.com/ayenller/tidb-ai-demos/tree/main/01-airport-search"
+       target="_blank" rel="noopener">README</a>
   </header>
 
   <main>
     <section id="globe-pane">
-      <canvas id="globe"></canvas>
+      <canvas id="globe" role="img" aria-label="Interactive globe of the airports in this dataset"></canvas>
       <div class="globe-title"><span id="globe-title-text"></span> · <span id="globe-mode">…</span></div>
       <div class="globe-legend">
         <span><i style="background:#4ef0bb"></i><span id="lg-hub"></span></span>

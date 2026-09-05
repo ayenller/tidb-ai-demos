@@ -50,9 +50,22 @@ def fetch(url: str, name: str) -> str:
 
 
 def size_class(out_routes: int) -> str:
+    """Route degree -> size band. The `size_class` column and the words that
+    go into `doc` must come from the same call: they used to use different
+    thresholds, so an airport could be stored as 'large' while its indexed
+    text called it regional."""
     if out_routes > 300:
         return "hub"
-    return "large" if out_routes > 60 else "regional"
+    if out_routes > 60:
+        return "large"
+    return "regional"
+
+
+SIZE_WORDS = {
+    "hub": "major international hub very large airport",
+    "large": "large international airport",
+    "regional": "regional airport limited service",
+}
 
 
 def build_doc(row: dict, out_routes: int) -> str:
@@ -64,14 +77,7 @@ def build_doc(row: dict, out_routes: int) -> str:
     """
     tz = (row["tz"] or "")
     region = REGION_BY_TZ.get(tz.split("/")[0], "")
-    if out_routes > 300:
-        size = "major international hub very large airport"
-    elif out_routes > 80:
-        size = "large international airport"
-    elif out_routes > 15:
-        size = "regional airport"
-    else:
-        size = "small airport limited service"
+    size = SIZE_WORDS[size_class(out_routes)]
     alt = "high altitude mountain airport" if row["alt_ft"] > 6000 else ""
     parts = [
         row["name"], row["city"], row["country"],
@@ -142,7 +148,6 @@ def main() -> None:
 
     conn = db.connect()
     with conn.cursor() as cur:
-        cur.execute("SET SESSION tidb_enable_vectorized_expression = ON")
         for i in range(0, len(rows), 200):
             cur.executemany(
                 "REPLACE INTO airports "

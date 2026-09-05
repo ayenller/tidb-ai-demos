@@ -131,6 +131,28 @@ GATE = {
 完整的融合 SQL 在 [`sql/02_queries.sql`](sql/02_queries.sql) —— 一条语句，一次往返，
 一个一致性快照。
 
+两道门限的性质不一样，值得分开说：`@gv` 是余弦相似度，有界，**跨语料可比**；
+`@gfa` 是 BM25 绝对下限，而 **BM25 的分数没有归一化**，所以 0.30 这个数字是针对
+这个 107 行的样本标定的，换数据集必须重新标。相对门限 `@gfr`（本次查询最高分的 12%）
+则是尺度无关的 —— 但它救不了"所有行都只匹配上 airport"这种情况，因为那时候最高分本身
+就没有意义。所以两道都要。
+
+## 让三份 SQL 不漂移
+
+同一份 SQL 在仓库里存在三处：`sql/02_queries.sql`（给人读的参考）、
+`app/search.py`（后端真正执行的）、`web/js/app.js`（页面抽屉里显示的）。
+README 敢说"页面上看到的 SQL 就是真正跑的 SQL"，前提是它们真的一致 ——
+而它们已经漂移过一次：融合门限在 JS 里是 0.30，在 .sql 里声明成了会话变量，
+底下的查询却硬编码了另一个字面量。
+
+```bash
+python3 scripts/check_consistency.py      # 装了 sqlglot 还会做语法解析检查
+```
+
+它比对 RRF 的 k、候选池大小、三路权重、两道门限、每列条数，
+以及 `data.js` 和 `load_data.py` 里写进 `doc` 的那几个词组，
+任何一处对不上就非零退出。
+
 ---
 
 ## 跑真的 TiDB
@@ -151,6 +173,12 @@ open http://localhost:8000
 
 `--limit` 会按航线度数排序后截断，所以小规模跑到的都是真正有人搜的大机场。
 全量 7,698 个机场用 `text-embedding-3-small` 大约几美分。
+
+**关于页面上那个 ms 数字**：它只算 SQL。把查询转成向量是一次到模型服务商的网络往返
+（通常 100–300ms，比任何一条查询都慢），如果把它算进"向量检索耗时"，
+这个对比就变成在量 OpenAI 的延迟而不是 TiDB 的。所以 embedding 只做一次、单独计时、
+单独显示在对比行里。数据库连接也是按线程复用的 —— 否则每条查询都要先做一次 TLS 握手，
+四列的数字全是握手时间。
 
 **版本要求**：全文检索（`FTS_MATCH_WORD` / `WITH PARSER MULTILINGUAL`）目前在
 TiDB Cloud Starter / Essential 上可用；向量索引需要表有 TiFlash 副本
@@ -224,6 +252,7 @@ sql/02_queries.sql       四种检索的 SQL 原文，逐条带注释 ← 想看
 scripts/load_data.py     下载 OpenFlights、构造 doc、批量 embedding、写入
 scripts/dev_server.py    不带缓存的静态服务器
 scripts/build_outlines.py 重新生成 web/js/world.js（只依赖标准库）
+scripts/check_consistency.py  检查三份 SQL 和调参常量有没有漂移
 app/search.py            四个检索函数 + RRF 融合（Python 侧）
 app/main.py              FastAPI：/api/search、/api/airports、静态页面
 web/index.html           页面

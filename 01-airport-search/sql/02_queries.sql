@@ -109,19 +109,24 @@ LIMIT 3;
 -- k = 60 is the standard constant; it damps the tail, so being #1 in one
 -- list beats being #4 in two lists only slightly.
 --
--- The two score gates are the part most write-ups leave out. Plain RRF
--- looks only at rank, so a retriever that found nothing useful still gets
--- to vote with its rank-1 garbage. Without the gates, "airport near
--- Silicon Valley" is decided by ten BM25 rows whose only shared word is
--- "airport".
+-- The score gates are the part most write-ups leave out. Plain RRF looks
+-- only at rank, so a retriever that found nothing useful still gets to
+-- vote with its rank-1 garbage. Without the gates, "airport near Silicon
+-- Valley" is decided by ten BM25 rows whose only shared word is "airport".
+--
+-- @gv is comparable across corpora: cosine similarity is bounded. @gfa is
+-- not — BM25 output is unnormalised, so an absolute floor has to be
+-- calibrated against your own data. 0.30 is calibrated for this one.
 --
 -- One statement. One round trip. One transaction-consistent snapshot.
 -- ---------------------------------------------------------------------
 SET @qv  = '[0.0131,-0.4422, ... 1532 more ... ,0.0917]';   -- = embed(:q)
 SET @k   = 60;      -- RRF constant
-SET @n   = 20;      -- candidates each retriever contributes to the fusion
 SET @gv  = 0.58;    -- vector gate: cosine-similarity floor
-SET @gf  = 0.30;    -- full-text gate: BM25 floor
+SET @gfa = 0.30;    -- full-text gate: absolute BM25 floor
+SET @gfr = 0.12;    -- full-text gate: fraction of this query's best score
+-- The candidate pool stays a literal 20 in each CTE below: LIMIT does not
+-- accept a user variable outside a prepared statement.
 
 WITH
 lex AS (                                    -- (1) LIKE candidates
@@ -136,25 +141,31 @@ lex AS (                                    -- (1) LIKE candidates
        OR iata = UPPER(:q)
     LIMIT 20
 ),
-fts AS (                                    -- (2) full-text candidates
-    SELECT id, ROW_NUMBER() OVER (ORDER BY FTS_MATCH_WORD(:q, doc) DESC) AS rnk
+fts_raw AS (                                -- (2) full-text candidates
+    SELECT id, FTS_MATCH_WORD(:q, doc) AS s
     FROM airports
     WHERE FTS_MATCH_WORD(:q, doc)
-      AND FTS_MATCH_WORD(:q, doc) >= 0.30        -- gate
+    ORDER BY s DESC
     LIMIT 20
 ),
+fts AS (
+    SELECT id, ROW_NUMBER() OVER (ORDER BY s DESC) AS rnk
+    FROM fts_raw
+    WHERE s >= @gfa                                   -- absolute floor
+      AND s >= @gfr * (SELECT MAX(s) FROM fts_raw)    -- and relative to the
+),                                                    -- best score this query got
 vec AS (                                    -- (3) vector candidates
     SELECT id, ROW_NUMBER() OVER (ORDER BY VEC_COSINE_DISTANCE(doc_vec, @qv)) AS rnk
     FROM (
         SELECT id, doc_vec
         FROM airports
-        WHERE 1 - VEC_COSINE_DISTANCE(doc_vec, @qv) >= 0.58   -- gate
+        WHERE 1 - VEC_COSINE_DISTANCE(doc_vec, @qv) >= @gv    -- gate
         ORDER BY VEC_COSINE_DISTANCE(doc_vec, @qv)
         LIMIT 20
     ) t
 ),
 fused AS (
-    SELECT id, SUM(w / (60 + rnk)) AS rrf
+    SELECT id, SUM(w / (@k + rnk)) AS rrf
     FROM (
         SELECT id, rnk, 1.0 AS w FROM lex
         UNION ALL

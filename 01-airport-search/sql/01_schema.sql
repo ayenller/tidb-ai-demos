@@ -56,13 +56,13 @@ ALTER TABLE airports SET TIFLASH REPLICA 1;
 -- Routes are here so the demo page can draw real flight arcs, and so demo 02
 -- (flight RAG) can join structured filters onto the same search results.
 CREATE TABLE routes (
-    id            BIGINT AUTO_RANDOM,
+    -- AUTO_RANDOM has to sit on the primary key column itself
+    id            BIGINT AUTO_RANDOM PRIMARY KEY,
     airline       VARCHAR(16)  NOT NULL,
     src_iata      CHAR(3)      NOT NULL,
     dst_iata      CHAR(3)      NOT NULL,
     stops         TINYINT      NOT NULL DEFAULT 0,
     equipment     VARCHAR(64)  DEFAULT NULL,
-    PRIMARY KEY (id),
     KEY idx_src (src_iata),
     KEY idx_dst (dst_iata)
 );

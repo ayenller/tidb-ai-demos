@@ -75,9 +75,13 @@ LIMIT 3;
 --
 -- RRF fuses RANKS, so a BM25 score, a cosine similarity and a hand-made
 -- CASE expression never have to be normalised onto one scale.
-SET @qv = '[0.0131,-0.4422, ... 1532 more ... ,0.0917]';   -- embed('${q}')
-SET @k  = 60;      -- standard RRF constant
-SET @n  = 20;      -- candidates each retriever contributes
+SET @qv  = '[0.0131,-0.4422, ... 1532 more ... ,0.0917]';   -- embed('${q}')
+SET @k   = 60;      -- standard RRF constant
+SET @gv  = 0.58;    -- vector gate: cosine-similarity floor
+SET @gfa = 0.30;    -- full-text gate: absolute BM25 floor
+SET @gfr = 0.12;    -- full-text gate: fraction of this query's best score
+-- (the pool size stays a literal 20 below: LIMIT will not take a user
+--  variable outside a prepared statement)
 
 WITH
 lex AS (                                    -- (1) LIKE candidates
@@ -90,25 +94,31 @@ lex AS (                                    -- (1) LIKE candidates
     WHERE name LIKE '%${q}%' OR city LIKE '%${q}%' OR iata = UPPER('${q}')
     LIMIT 20
 ),
-fts AS (                                    -- (2) full-text candidates
-    SELECT id, ROW_NUMBER() OVER (ORDER BY FTS_MATCH_WORD('${q}', doc) DESC) AS rnk
+fts_raw AS (                                -- (2) full-text candidates
+    SELECT id, FTS_MATCH_WORD('${q}', doc) AS s
     FROM airports
     WHERE FTS_MATCH_WORD('${q}', doc)
-      AND FTS_MATCH_WORD('${q}', doc) >= 0.30   -- score gate, see note below
+    ORDER BY s DESC
     LIMIT 20
+),
+fts AS (
+    SELECT id, ROW_NUMBER() OVER (ORDER BY s DESC) AS rnk
+    FROM fts_raw
+    WHERE s >= @gfa                                   -- score gates,
+      AND s >= @gfr * (SELECT MAX(s) FROM fts_raw)    -- see note below
 ),
 vec AS (                                    -- (3) vector candidates
     SELECT id, ROW_NUMBER() OVER (ORDER BY VEC_COSINE_DISTANCE(doc_vec, @qv)) AS rnk
     FROM (
         SELECT id, doc_vec
         FROM airports
-        WHERE 1 - VEC_COSINE_DISTANCE(doc_vec, @qv) >= 0.58   -- score gate
+        WHERE 1 - VEC_COSINE_DISTANCE(doc_vec, @qv) >= @gv    -- score gate
         ORDER BY VEC_COSINE_DISTANCE(doc_vec, @qv)
         LIMIT 20
     ) t
 ),
 fused AS (
-    SELECT id, SUM(w / (60 + rnk)) AS rrf
+    SELECT id, SUM(w / (@k + rnk)) AS rrf
     FROM (
         SELECT id, rnk, 1.0 AS w FROM lex
         UNION ALL
@@ -128,10 +138,14 @@ JOIN airports a ON a.id = f.id
 ORDER BY f.rrf DESC
 LIMIT 3;
 
--- The two score gates matter. Plain RRF only looks at rank, so a retriever
--- that found nothing useful still votes with its rank-1 garbage. Gating on
--- score first is what stops "airport near Silicon Valley" from being decided
--- by ten BM25 rows whose only shared word is "airport".`,
+-- The score gates matter. Plain RRF only looks at rank, so a retriever that
+-- found nothing useful still votes with its rank-1 garbage. Gating on score
+-- first is what stops "airport near Silicon Valley" from being decided by ten
+-- BM25 rows whose only shared word is "airport".
+--
+-- @gv is comparable across corpora — cosine similarity is bounded. @gfa is
+-- not: BM25 output is unnormalised, so an absolute floor has to be calibrated
+-- against your own data. 0.30 is calibrated for this one.`,
   };
 
   let live = false, live_n = 0, globe = null, lastResult = null, sqlTab = "hybrid";
@@ -198,10 +212,15 @@ LIMIT 3;
     $("#lg-regional").textContent = T.regional;
     $("#globe-hint").textContent = T.globeHint;
     $("#q").placeholder = T.placeholder;
+    $("#q").setAttribute("aria-label", T.placeholder);
     $("#run").textContent = T.search;
     $("#verdict-key").textContent = T.compare;
     $("#sql-label").textContent = T.sqlSummary;
-    $$(".lang").forEach((b) => b.classList.toggle("on", b.dataset.lang === lang));
+    $$(".lang").forEach((b) => {
+      const on = b.dataset.lang === lang;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", String(on));
+    });
     STRATS.forEach((s) => {
       $(`#blurb-${s.key}`).innerHTML = T.cols[s.key].blurb
         + (s.code ? ` <code>${esc(s.code)}</code>` : "");
@@ -237,6 +256,7 @@ LIMIT 3;
       const c = el("button", "chip");
       c.innerHTML = `${esc(p.label)}<small>${esc(p.q.length > 26 ? p.q.slice(0, 24) + "…" : p.q)}</small>`;
       c.title = p.hint;
+      c.setAttribute("aria-label", `${p.label}: ${p.q}`);
       c.dataset.q = p.q;
       c.addEventListener("click", () => run(p.q));
       box.appendChild(c);
@@ -271,21 +291,36 @@ LIMIT 3;
 
   /** Map the FastAPI payload onto the shape the UI already renders. */
   function normalizeServer(j) {
-    const out = { query: j.query, strategies: {} };
+    const out = { query: j.query, embedMs: j.embed_ms, strategies: {} };
     const LABEL = { like_rank: "LIKE", fts_rank: "FTS", vec_rank: "VEC" };
     for (const [k, v] of Object.entries(j.strategies)) {
       const max = Math.max(...v.results.map((r) => r.score), 1e-9);
       out.strategies[k] = {
         tookMs: v.took_ms, error: v.error,
-        results: v.results.map((r) => ({
+        results: gateServer(k, v.results.map((r) => ({
           id: r.id, a: r, rank: r.rank, score: r.score, norm: r.score / max,
           why: Object.entries(LABEL)
             .filter(([col]) => r[col] != null)
             .map(([col, name]) => ({ k: "src", r: name, n: r[col] })),
-        })),
+        }))),
       };
     }
     return out;
+  }
+
+  /** The backend gates inside the fusion, but returns the raw lists for the
+   *  other columns. Apply the same thresholds here so a low-confidence row
+   *  looks the same whether the page is offline or talking to TiDB. */
+  function gateServer(key, rows) {
+    const G = Engine.GATE;
+    if (key === "vector")
+      return rows.map((r) => ({ ...r, belowGate: r.score < G.vector }));
+    if (key === "fulltext") {
+      const top = rows.length ? rows[0].score : 0;
+      const floor = Math.max(G.fulltextAbs, G.fulltextRel * top);
+      return rows.map((r) => ({ ...r, belowGate: r.score < floor }));
+    }
+    return rows;
   }
 
   // ----------------------------------------------------------- columns ---
@@ -388,11 +423,13 @@ LIMIT 3;
     });
     const onlyVec = [...ids.vector].filter((i) => !ids.like.has(i) && !ids.fulltext.has(i));
     const onlyLex = [...new Set([...ids.like, ...ids.fulltext])].filter((i) => !ids.vector.has(i));
-    const code = (id) => {
-      const a = AIRPORTS.find((x) => x.id === id)
-        || (res.strategies.hybrid.results.find((r) => r.id === id) || {}).a;
-      return (a && a.iata) || "?";
-    };
+    // Build the lookup from the results themselves. Live TiDB rows carry
+    // OpenFlights ids, which do not exist in the offline sample, so looking
+    // them up in AIRPORTS printed "?" for every airport in live mode.
+    const byId = new Map();
+    Object.values(res.strategies).forEach((st) =>
+      (st.results || []).forEach((r) => byId.set(r.id, r.a)));
+    const code = (id) => (byId.get(id) || {}).iata || "?";
 
     const counts = STRATS.map((s) => {
       const all = (res.strategies[s.key].results || []).length;
@@ -406,15 +443,23 @@ LIMIT 3;
     if (onlyLex.length) bits.push(esc(T.onlyLexical(onlyLex.slice(0, 6).map(code).join(" "))));
     if (!bits.length) bits.push(esc(T.allAgree));
 
+    const embed = res.embedMs != null
+      ? `<br><span style="color:var(--fg-faint)">${esc(T.embedMs(Math.round(res.embedMs)))}</span>`
+      : "";
     const preset = t().presets.find((p) => p.q === q);
     $("#verdict-body").innerHTML =
       `${counts}<br><span style="opacity:.85">${bits.join(" &nbsp;|&nbsp; ")}</span>`
+      + embed
       + (preset ? `<br><span style="color:var(--fg-faint)">💡 ${esc(preset.hint)}</span>` : "");
   }
 
   // --------------------------------------------------------------- sql ---
   function paintSql() {
-    $$(".sqltab").forEach((b) => b.classList.toggle("on", b.dataset.k === sqlTab));
+    $$(".sqltab").forEach((b) => {
+      const on = b.dataset.k === sqlTab;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", String(on));
+    });
     const q = ((lastResult && lastResult.query) || "").replace(/'/g, "''");
     $("#sql").innerHTML = esc(SQL[sqlTab](q))
       .replace(/(--[^\n]*)/g, '<span class="cm">$1</span>')
