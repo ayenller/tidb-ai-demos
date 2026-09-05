@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "airport-search-web",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["01-airport-search/scripts/dev_server.py", "8137"],
+      "port": 8137
+    }
+  ]
+}

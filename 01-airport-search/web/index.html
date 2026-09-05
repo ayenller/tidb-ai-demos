@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Airport Search · 四种检索方式的差异 · TiDB AI Demos</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>✈️</text></svg>">
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="brand">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="1.6"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9.2"/>
+        <ellipse cx="12" cy="12" rx="4" ry="9.2"/>
+        <path d="M2.8 12h18.4M4.6 6.6h14.8M4.6 17.4h14.8"/>
+      </svg>
+      <div>
+        <h1>Airport Search · 四种检索方式</h1>
+        <p>同一个查询，四条不同的路：LIKE / 全文 / 向量 / 融合 — 全部跑在一张 TiDB 表上</p>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <span class="badge" id="mode">OFFLINE SAMPLE</span>
+    <a href="../README.md">README</a>
+  </header>
+
+  <main>
+    <section id="globe-pane">
+      <canvas id="globe"></canvas>
+      <div class="globe-title">Global airport network · <span id="globe-mode">…</span></div>
+      <div class="globe-legend">
+        <span><i style="background:#34d399"></i>hub</span>
+        <span><i style="background:#38bdf8"></i>large</span>
+        <span><i style="background:#475f7d"></i>regional</span>
+      </div>
+      <div class="globe-hint">拖动旋转 · 滚轮缩放 · 悬停查看</div>
+      <div id="globe-tip"></div>
+    </section>
+
+    <section id="work">
+      <div class="searchbar">
+        <div class="field">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8397b4" stroke-width="2"
+               stroke-linecap="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/>
+          </svg>
+          <input id="q" placeholder="搜索机场：名称、城市、IATA 代码，或者直接描述你想找什么…"
+                 autocomplete="off" spellcheck="false">
+          <button id="run">Search</button>
+        </div>
+        <div class="presets"></div>
+      </div>
+
+      <p class="verdict"><span class="k">对比</span><span id="verdict-body">…</span></p>
+
+      <div class="cols"></div>
+
+      <details class="sqlbar">
+        <summary>
+          实际执行的 SQL
+          <button class="sqltab" data-k="like">LIKE</button>
+          <button class="sqltab" data-k="fulltext">FULLTEXT</button>
+          <button class="sqltab" data-k="vector">VECTOR</button>
+          <button class="sqltab" data-k="hybrid">HYBRID</button>
+        </summary>
+        <pre id="sql"></pre>
+      </details>
+    </section>
+  </main>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="js/data.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/globe.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
